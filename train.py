@@ -1,26 +1,6 @@
 """
-Cataract Classification — Quantum-Hybrid vs Classical (v8 — scientifically fair)
-=================================================================================
-Target : Intel i7-9700 (8 cores) — CPU-only
-
-FAIRNESS AUDIT FIXES (v8 — no model gets special treatment):
-  1. Identical grad-clip (1.0) for both QH and CL — no asymmetric clip
-  2. _make_optimizer: same LR-group structure for QH and CL
-     (backbone=lr_backbone, everything-else=lr) — quantum params use lr, not a
-     separate lr_qc, so neither model receives a hidden extra tuning advantage
-  3. Collapse detection / _reinit_projection removed entirely — CL never had
-     this rescue mechanism; giving it only to QH is an adaptive advantage
-  4. write_auc_proof_report: no AUC-threshold filtering of QH models;
-     ALL models (QH and CL) are reported unconditionally
-  5. plot_per_model_auc_comparison: neutral bar chart — no red «collapsed» colour
-     coding, no ★ annotations, no special QH winner markers
-  6. Result dict «Circuit» field updated for CL (now MLP head, not linear)
-  7. Output dir → quantum_output_v8
-
-PRESERVED (unchanged): quantum circuit improvements from v7 (Hadamard, RY+RZ,
-  ring entanglement, alpha gate, dropout_q), matched MLP head depth, removed
-  torch.no_grad() from CL forward, scheduler re-creation after unfreeze,
-  all plots / reports / McNemar test.
+Quantum Hybrid vs Classical Cataract Classification
+Training and Evaluation Pipeline
 """
 
 import os, gc, argparse, random, json, logging
