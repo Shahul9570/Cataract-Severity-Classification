@@ -136,11 +136,7 @@ def build_quantum_layer(n_qubits, n_layers):
             for i in range(n_qubits):
                 qml.Rot(weights[l, i, 0], weights[l, i, 1], weights[l, i, 2], wires=i)
 
-        # Mixed PauliZ + PauliX measurements:
-        #   Even qubits → PauliZ (computational basis: amplitude info)
-        #   Odd  qubits → PauliX (Hadamard basis: phase / interference info)
-        # This doubles the observable diversity without adding qubits,
-        # giving the model access to both amplitude and phase information flow.
+        # Mixed Pauli-Z/X measurements
         return [
             qml.expval(qml.PauliZ(i)) if i % 2 == 0 else qml.expval(qml.PauliX(i))
             for i in range(n_qubits)
@@ -172,24 +168,8 @@ def _partial_unfreeze(bb, name):
 # ── Models ───────────────────────────────────────────────────────────────────
 class QuantumHybridModel(nn.Module):
     """
-    Hybrid quantum-classical architecture (v3 — multi-block).
-
-    Backbone → Projection (dim→512→256) → Qubit Encoder (256→n_q_blocks×n_qubits)
-             → n_q_blocks parallel quantum circuits
-             → Concatenate [backbone_256, q_out_scaled] → Head.
-
-    Key design choices:
-      • n_q_blocks parallel circuits (default 4×8 = 32 effective quantum outputs)
-        gives the quantum component 32-output influence while keeping each
-        individual circuit CPU-feasible (2⁸ = 256 state-vector amplitudes).
-      • log_scale: learnable scalar gates the angle magnitude entering circuits.
-      • q_out_scale: learnable per-output weight applied AFTER the circuits.
-        Allows the head to up-weight or suppress individual quantum features.
-      • Backbone features (256-dim) are concatenated with all quantum outputs
-        (n_q_blocks×n_qubits-dim) before the classification head.
-      • Per-sample quantum loop is minimised by using batch_size=8 (8 iterations
-        vs 32) and by trying native PennyLane batch execution first.
-    """
+Quantum-hybrid architecture with multi-block quantum layers.
+"""
     def __init__(self, backbone_name, n_qubits, n_layers, image_size,
                  n_q_blocks=None):
         super().__init__()
@@ -230,13 +210,7 @@ class QuantumHybridModel(nn.Module):
         # Learnable per-output scale applied after quantum circuits
         self.q_out_scale = nn.Parameter(torch.ones(total_q_out))
 
-        # ── Gated Fusion ───────────────────────────────────────────────────────────────
-        # Both backbone_feat (h2=256) and q_out (total_q_out=48) are projected
-        # to the same fused_gate_dim (256) then blended by a sigmoid gate.
-        # gate  = σ( W_gate · [backbone_feat; q_out] )  ∈ (0,1)²⁵⁶
-        # fused = gate ⊙ bb_proj + (1−gate) ⊙ q_proj
-        # This lets the model dynamically up-weight backbone OR quantum path
-        # on a per-sample, per-feature basis without hard-coded blending.
+      
         self.fusion_bb   = nn.Linear(h2, fused_gate_dim)          # backbone path
         self.fusion_q    = nn.Linear(total_q_out, fused_gate_dim)  # quantum path
         self.fusion_gate = nn.Sequential(
