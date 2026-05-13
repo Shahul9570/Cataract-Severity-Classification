@@ -50,22 +50,21 @@ CFG = {
     "classical_results_csv": Path("./multimodel1_output/final_results.csv"),
     "seed"        : 42,
     "classes"     : ["Immature_Cataract", "Mature_Cataract", "Normal_Eye"],
-    "epochs"      : 35,          # 30–40 range; QH and CL both benefit from longer training
-    "batch_size"  : 16,          # 16 for RTX 3060: balances GPU throughput vs quantum loop
-    "lr"          : 2e-4,        # same for QH and CL — no exclusive advantage
+    "epochs"      : 35,          
+    "batch_size"  : 16,          
+    "lr"          : 2e-4,        
     "lr_min"      : 1e-6,
     "lr_backbone" : 5e-5,        # phase-2 backbone LR (same for both)
-    # lr_qc removed: optimizer uses only 2 groups (backbone + all others)
-    # Adding a 3rd group exclusively for QH would break fairness
+   
     "patience"    : 8,
     "weight_decay": 1e-4,
     "label_smooth": 0.1,
 
     "num_workers" : 4,
     "warmup_epochs": 4,
-    "n_qubits"    : 8,           # qubits per block (CPU-feasible: 2⁸=256 amplitudes)
-    "n_layers"    : 3,           # circuit layers per block
-    "n_q_blocks"  : 4,           # parallel blocks → 8×4=32 effective quantum outputs
+    "n_qubits"    : 8,           
+    "n_layers"    : 3,           
+    "n_q_blocks"  : 4,           
     "proj_hidden" : 256,
     "models": [
         "resnet50","densenet121","inception_v3","mobilenetv3_large_100",
@@ -81,10 +80,10 @@ NUM_CLASSES = len(CLASSES)
 if torch.cuda.is_available():
     DEVICE = torch.device("cuda")
     torch.backends.cudnn.enabled       = True
-    torch.backends.cudnn.benchmark     = True   # auto-tune conv kernels (fixed input size)
-    torch.backends.cudnn.deterministic = False   # allow non-deterministic faster kernels
-    torch.backends.cuda.matmul.allow_tf32 = True # TF32 for matmul (Ampere+)
-    torch.backends.cudnn.allow_tf32    = True    # TF32 for conv (Ampere+)
+    torch.backends.cudnn.benchmark     = True   
+    torch.backends.cudnn.deterministic = False   
+    torch.backends.cuda.matmul.allow_tf32 = True 
+    torch.backends.cudnn.allow_tf32    = True    
     torch.cuda.manual_seed(CFG["seed"])
     _gpu = torch.cuda.get_device_properties(0)
     log.info(f"CUDA: {_gpu.name} | {_gpu.total_memory//1024**3}GB | "
@@ -96,7 +95,7 @@ else:
     torch.backends.cpu.allow_bf16_reduced_precision_reduction = True
     log.info("CUDA not available — running on CPU (slower)")
 
-_PIN_MEM = (DEVICE.type == "cuda")   # pin_memory speeds up CPU→GPU transfers
+_PIN_MEM = (DEVICE.type == "cuda")   
 COLOR_QH = "#7B52AB"
 COLOR_CL  = "#3B82C4"
 random.seed(CFG["seed"]); np.random.seed(CFG["seed"]); torch.manual_seed(CFG["seed"])
@@ -117,26 +116,26 @@ def build_quantum_layer(n_qubits, n_layers):
 
     @qml.qnode(dev, interface="torch", diff_method="adjoint")
     def circuit(inputs, weights):
-        # Hadamard initialisation — puts all qubits in uniform |+⟩ superposition
+        
         for i in range(n_qubits):
             qml.Hadamard(wires=i)
 
         for l in range(n_layers):
-            # Dual-axis data re-uploading: RY (amplitude) + RZ (phase)
+            
             for i in range(n_qubits):
                 qml.RY(torch.pi * torch.tanh(inputs[i]), wires=i)
                 qml.RZ(torch.pi * inputs[i],              wires=i)
 
-            # Ladder entanglement + ring closure
+            
             for i in range(n_qubits - 1):
                 qml.CNOT(wires=[i, i + 1])
             qml.CNOT(wires=[n_qubits - 1, 0])
 
-            # Trainable Euler-angle rotations per qubit
+            
             for i in range(n_qubits):
                 qml.Rot(weights[l, i, 0], weights[l, i, 1], weights[l, i, 2], wires=i)
 
-        # Mixed Pauli-Z/X measurements
+      
         return [
             qml.expval(qml.PauliZ(i)) if i % 2 == 0 else qml.expval(qml.PauliX(i))
             for i in range(n_qubits)
@@ -177,48 +176,46 @@ Quantum-hybrid architecture with multi-block quantum layers.
         self.backbone, dim = _make_backbone(backbone_name, image_size)
         self._n_qubits   = n_qubits
         self._n_q_blocks = n_q_blocks or CFG.get("n_q_blocks", 1)
-        total_q_out      = self._n_qubits * self._n_q_blocks  # 8×4 = 32
-        h1, h2  = 512, CFG["proj_hidden"]   # backbone compressor dims
-        fused_gate_dim = h2                               # 256 — shared gating dim
+        total_q_out      = self._n_qubits * self._n_q_blocks  
+        h1, h2  = 512, CFG["proj_hidden"]   
+        fused_gate_dim = h2                               
         log.info(f"  [QH] dim={dim} proj={dim}->{h1}->{h2}->{total_q_out} "
                  f"({self._n_q_blocks} blocks×{n_qubits}q) "
                  f"gate_fused={fused_gate_dim} layers={n_layers}")
 
-        # Backbone compressor: dim → 512 → 256
-        # (named 'projection' so freeze_backbone() keeps it trainable in phase 1)
+        
         self.projection = nn.Sequential(
             nn.Linear(dim, h1), nn.GELU(), nn.Dropout(0.2),
             nn.Linear(h1, h2), nn.GELU(), nn.Dropout(0.1),
         )
 
-        # Qubit encoder: 256 → total_q_out (outputs split per block)
-        # (named 'projection_qubit' → contains 'projection' → trainable in phase 1)
+       
         self.projection_qubit = nn.Sequential(
             nn.Linear(h2, total_q_out),
             nn.LayerNorm(total_q_out),
         )
 
-        # n_q_blocks independent quantum circuits
+       
         self.quantum_layers = nn.ModuleList([
             build_quantum_layer(n_qubits, n_layers)
             for _ in range(self._n_q_blocks)
         ])
 
-        # Learnable input scale: angles *= exp(log_scale) before entering circuit
-        self.log_scale   = nn.Parameter(torch.zeros(1))   # exp(0)=1.0 at init
 
-        # Learnable per-output scale applied after quantum circuits
+        self.log_scale   = nn.Parameter(torch.zeros(1))   
+
+       
         self.q_out_scale = nn.Parameter(torch.ones(total_q_out))
 
       
-        self.fusion_bb   = nn.Linear(h2, fused_gate_dim)          # backbone path
-        self.fusion_q    = nn.Linear(total_q_out, fused_gate_dim)  # quantum path
+        self.fusion_bb   = nn.Linear(h2, fused_gate_dim)          
+        self.fusion_q    = nn.Linear(total_q_out, fused_gate_dim)  
         self.fusion_gate = nn.Sequential(
             nn.Linear(h2 + total_q_out, fused_gate_dim),
             nn.Sigmoid(),
         )
 
-        # BN and head operate on the fused (gated) tensor
+        
         self.bn        = nn.BatchNorm1d(fused_gate_dim)
         self.dropout_q = nn.Dropout(0.1)
         self.head      = nn.Linear(fused_gate_dim, NUM_CLASSES)
@@ -231,15 +228,15 @@ Quantum-hybrid architecture with multi-block quantum layers.
         Falls back reliably to a per-sample loop.
         """
         try:
-            out = ql(x)                               # native batch attempt
-            # TorchLayer may return [n_q, B] or [B, n_q] depending on version
+            out = ql(x)                            
+           
             if out.dim() == 2:
                 return out if out.shape[0] == x.shape[0] else out.T
-            if out.dim() == 1:                        # single sample edge-case
+            if out.dim() == 1:                       
                 return out.unsqueeze(0)
         except Exception:
             pass
-        # Reliable fallback: explicit per-sample loop
+        
         return torch.stack([ql(x[i]) for i in range(x.shape[0])])
 
     def _quantum_forward(self, angles):
@@ -252,32 +249,30 @@ Quantum-hybrid architecture with multi-block quantum layers.
         flow transparently — no .detach() is used.
         """
         device = angles.device
-        # Transfer to CPU for quantum computation (autograd-safe: no detach)
+       
         angles_cpu    = angles.cpu()
-        # Clamp to [-1, 1] BEFORE scaling to prevent extreme circuit inputs
-        # that cause barren plateau-like gradient vanishing
+        
         angles_cpu    = torch.clamp(angles_cpu, -1.0, 1.0)
         log_scale_cpu = self.log_scale.cpu()
-        scaled        = angles_cpu * torch.exp(log_scale_cpu)   # learnable in-scale
-        chunks        = scaled.chunk(self._n_q_blocks, dim=1)   # split per block
+        scaled        = angles_cpu * torch.exp(log_scale_cpu)   
+        chunks        = scaled.chunk(self._n_q_blocks, dim=1)   
         q_blocks      = [self._run_qblock(ql, chunk)
                          for ql, chunk in zip(self.quantum_layers, chunks)]
-        q_out_cpu     = torch.cat(q_blocks, dim=1)              # [B, total_q]
-        # Back to original device; q_out_scale lives on DEVICE for efficient scaling
-        return q_out_cpu.to(device) * self.q_out_scale          # learnable out-scale
+        q_out_cpu     = torch.cat(q_blocks, dim=1)             
+        return q_out_cpu.to(device) * self.q_out_scale          
 
     def forward(self, x):
-        feats         = self.backbone(x)                        # [B, dim]
-        backbone_feat = self.projection(feats)                  # [B, 256]
-        angles        = self.projection_qubit(backbone_feat)    # [B, total_q]
-        q_out         = self._quantum_forward(angles)           # [B, total_q]
+        feats         = self.backbone(x)                        
+        backbone_feat = self.projection(feats)                 
+        angles        = self.projection_qubit(backbone_feat)    
+        q_out         = self._quantum_forward(angles)           
         # ── Gated Fusion ─────────────────────────────────────────────────────
-        bb_proj = self.fusion_bb(backbone_feat)                 # [B, 256]
-        q_proj  = self.fusion_q(q_out)                          # [B, 256]
+        bb_proj = self.fusion_bb(backbone_feat)               
+        q_proj  = self.fusion_q(q_out)                      
         gate    = self.fusion_gate(
-            torch.cat([backbone_feat, q_out], dim=1)            # [B, 256+total_q]
-        )                                                       # [B, 256] ∈ (0,1)
-        fused   = gate * bb_proj + (1.0 - gate) * q_proj       # [B, 256]
+            torch.cat([backbone_feat, q_out], dim=1)           
+        )                                                       
+        fused   = gate * bb_proj + (1.0 - gate) * q_proj      
         return self.head(self.bn(self.dropout_q(fused)))
 
     def cached_forward(self, feats):
@@ -324,7 +319,7 @@ class ClassicalBaselineModel(nn.Module):
         )
 
     def forward(self, x):
-        feats = self.backbone(x)   # gradients flow once backbone is unfrozen in phase 2
+        feats = self.backbone(x)   
         return self.head(self.bn(feats))
 
     def cached_forward(self, feats):
@@ -376,7 +371,6 @@ def get_loaders(image_size):
     log.info(f"  Class counts: {dict(zip(CLASSES, counts.tolist()))}")
     sw = (1.0/counts.float())[y_tr]
     sampler = WeightedRandomSampler(sw, num_samples=len(sw), replacement=True)
-    # pin_memory=True speeds up CPU→GPU transfer via non_blocking=True in train loop
     kw = dict(num_workers=0, pin_memory=_PIN_MEM)
     trl = DataLoader(TensorDataset(X_tr,y_tr), batch_size=CFG["batch_size"], sampler=sampler, **kw)
     val = DataLoader(TensorDataset(X_va,y_va), batch_size=CFG["batch_size"], shuffle=False, **kw)
@@ -453,26 +447,20 @@ def evaluate(model, loader, use_cached=False):
         probs_l.append(p.cpu().numpy()); labels_l.append(labels.cpu().numpy())
     return loss_sum/total, correct/total, np.concatenate(probs_l), np.concatenate(labels_l)
 
-# _is_collapsed is no longer used (collapse detection removed in v8)
-# Kept as placeholder to avoid grep/reference errors.
+
 _is_collapsed = lambda val_acc: val_acc <= (1/NUM_CLASSES + 0.02)  # noqa: E731
 
 @torch.no_grad()
 def _cache_backbone_features(backbone, loader, is_train=True):
-    """
-    Pre-extract backbone features once from a FROZEN backbone.
-    Backbone runs on DEVICE (GPU if available); features stored on CPU to
-    avoid holding GPU VRAM for the whole dataset across warmup epochs.
-    The training loop moves feature batches to DEVICE on demand (non_blocking).
-    """
+   
     backbone.eval()
     Xf, Yf = [], []
     split = "train" if is_train else "val/test"
     for imgs, y in tqdm(loader, desc=f"  cache {split}", leave=False,
                         unit="bat", dynamic_ncols=True, colour="yellow"):
-        imgs = imgs.to(DEVICE, non_blocking=True)   # backbone on GPU
-        Xf.append(backbone(imgs).cpu())              # store on CPU (save VRAM)
-        Yf.append(y)                                  # labels already on CPU
+        imgs = imgs.to(DEVICE, non_blocking=True)   
+        Xf.append(backbone(imgs).cpu())              
+        Yf.append(y)                                 
     X = torch.cat(Xf); Y = torch.cat(Yf)
     if is_train:
         counts = torch.bincount(Y)
@@ -495,22 +483,7 @@ def unfreeze_all(model):
         param.requires_grad_(True)
 
 def _make_optimizer(model, phase=1):
-    """
-    Build AdamW with per-component learning rates.
-    Strictly identical logic for both QH and CL — no model-type branching.
 
-    Phase 1 (warmup, frozen backbone):
-      Single LR group — all trainable params at CFG["lr"].
-
-    Phase 2 (full fine-tune, backbone unfrozen):
-      Exactly TWO groups for both QH and CL:
-        backbone params → CFG["lr_backbone"]  (slow, prevents forgetting)
-        all other params → CFG["lr"]          (head, projection, quantum, gates, ...)
-
-    Note: lr_qc has been removed from CFG. Giving quantum params a 3rd LR group
-    exclusively for QH would break fairness, so all non-backbone params share
-    one rate regardless of model type.
-    """
     if phase == 1:
         params = [p for p in model.parameters() if p.requires_grad]
         return optim.AdamW(params, lr=CFG["lr"], weight_decay=CFG["weight_decay"])
@@ -530,20 +503,7 @@ def _make_optimizer(model, phase=1):
 # ── Checkpoint helpers ────────────────────────────────────────────────────────
 def _save_resume_ckpt(path, epoch, phase, model, opt, sch,
                       history, best_val, patience_ctr):
-    """
-    Save a full resume snapshot at the END of every epoch.
-
-    Contains everything needed to restart training from the next epoch with
-    identical optimizer and scheduler state:
-      epoch        — last completed epoch (resume starts from epoch+1)
-      phase        — 1 (warmup) or 2 (full fine-tune)
-      model_state  — model weights
-      opt_state    — AdamW momentum / variance buffers
-      sch_state    — CosineAnnealingLR t_cur, last_epoch
-      history      — full training log so far
-      best_val     — best validation accuracy seen (for patience)
-      patience_ctr — consecutive epochs without improvement
-    """
+  
     torch.save({
         "epoch"       : epoch,
         "phase"       : phase,
@@ -557,24 +517,7 @@ def _save_resume_ckpt(path, epoch, phase, model, opt, sch,
 
 
 def train_model(model, label, train_ldr, val_ldr, out_dir, ckpt_name):
-    """
-    Two-phase training — identical protocol for QH and CL.
-
-    Phase 1 (warmup, frozen backbone):
-      Backbone features are pre-extracted ONCE via _cache_backbone_features().
-      Warmup epochs iterate over cached (features, labels) — backbone forward
-      runs only once total instead of WARMUP × N_batches times.
-      Features are stored on CPU to conserve GPU VRAM; moved to DEVICE per batch.
-
-    Phase 2 (full fine-tune, backbone unfrozen):
-      End-to-end training with full image DataLoader. Separate backbone LR.
-
-    Crash Recovery:
-      A resume checkpoint (resume_{ckpt_name}) is saved at the END of every
-      epoch. On re-launch, if the file is found, all training state is restored
-      and the loop continues from the next epoch. The file is deleted on clean
-      completion.
-    """
+ 
     WARMUP      = CFG["warmup_epochs"]
     resume_path = out_dir / f"resume_{ckpt_name}"
 
@@ -582,14 +525,13 @@ def train_model(model, label, train_ldr, val_ldr, out_dir, ckpt_name):
     if resume_path.exists():
         log.info(f"  [{label}] ⚠️  Resume checkpoint found — restoring state ...")
         ckpt        = torch.load(resume_path, map_location=DEVICE, weights_only=False)
-        start_epoch = ckpt["epoch"] + 1      # resume from *next* epoch
+        start_epoch = ckpt["epoch"] + 1      
         phase       = ckpt["phase"]
         best_val    = ckpt["best_val"]
         patience_ctr= ckpt["patience_ctr"]
         history     = ckpt["history"]
         model.load_state_dict(ckpt["model_state"])
-        # Rebuild correct optimizer & scheduler for the saved phase BEFORE
-        # loading state_dicts (param group count must match).
+       
         if phase == 2 or start_epoch > WARMUP:
             phase = 2; unfreeze_all(model)
             opt = _make_optimizer(model, phase=2)
@@ -597,7 +539,7 @@ def train_model(model, label, train_ldr, val_ldr, out_dir, ckpt_name):
             freeze_backbone(model)
             opt = _make_optimizer(model, phase=1)
         opt.load_state_dict(ckpt["opt_state"])
-        # Move Adam buffers to DEVICE (they are saved on CPU by default)
+      
         for state in opt.state.values():
             for k, v in state.items():
                 if isinstance(v, torch.Tensor):
@@ -809,11 +751,7 @@ def plot_metrics_delta(mq, mc, name, out_dir):
     log.info("  Saved: metrics_delta_qh_vs_cl.png")
 
 def plot_per_model_auc_comparison(all_results, out_dir):
-    """
-    Neutral AUC bar chart — no model receives special colour coding,
-    no ★ annotations, no cherry-picking labels. Best-CL reference line
-    is shown as a neutral dashed line for readability only.
-    """
+   
     qh_rows=[r for r in all_results if r["Type"]=="QH"]
     cl_rows=[r for r in all_results if r["Type"]=="CL"]
     models=[r["Model"] for r in qh_rows]; qh_aucs=[r["AUC"] for r in qh_rows]
@@ -824,7 +762,7 @@ def plot_per_model_auc_comparison(all_results, out_dir):
     all_cl=list(cl_local.values())+list(ext_cl.values()); best_cl=max(all_cl) if all_cl else None
     x=np.arange(len(models)); w=0.35
     fig,ax=plt.subplots(figsize=(max(10,len(models)*1.8),7))
-    # Uniform colour for all QH bars — no special treatment based on AUC level
+    
     bq=ax.bar(x-w/2,qh_aucs,w,color=COLOR_QH,alpha=0.88,label="QH")
     cl_vals=[cl_local.get(m,0.0) for m in models]
     bc=ax.bar(x+w/2,cl_vals,w,color=COLOR_CL,alpha=0.88,label="CL")
@@ -833,7 +771,7 @@ def plot_per_model_auc_comparison(all_results, out_dir):
     for bar,val in zip(bc,cl_vals):
         ax.text(bar.get_x()+bar.get_width()/2,val+0.003,f"{val:.4f}",ha="center",va="bottom",fontsize=8,fontweight="bold",color=COLOR_CL)
     if best_cl:
-        # Reference line only — no winner annotations
+        
         ax.axhline(best_cl,color="grey",lw=1.5,ls="--",label=f"Best CL={best_cl:.4f}")
     ax.set_xticks(x); ax.set_xticklabels([m.replace("_","\n") for m in models],fontsize=9)
     ax.set_ylim(0.5,1.05); ax.set_ylabel("Macro AUC-ROC",fontsize=11)
